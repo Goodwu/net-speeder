@@ -86,7 +86,8 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 			libnet_handler = libnet_handlers[0];
 			write_func = &libnet_adv_write_raw_ipv4;
 		}
-		goto end;
+		else
+			goto end;
 	}
 	else if(ip->ip_v == 0x6) {
 		struct libnet_ipv6_hdr *ip6;
@@ -99,7 +100,8 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 			libnet_handler = libnet_handlers[1];
 			write_func = &libnet_write_raw_ipv6;
 		}
-		goto end;
+		else
+			goto end;
 	}
 
 	if(proto == IPPROTO_TCP) {
