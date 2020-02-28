@@ -66,9 +66,6 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 	struct libnet_ipv4_hdr *ip;
 
 	libnet_t **libnet_handlers = (libnet_t**)args;
-	libnet_t *libnet_handler4 = libnet_handlers[0];
-	libnet_t *libnet_handler6 = libnet_handlers[1];
-
 	libnet_t *libnet_handler;
 
 	int head_len, pack_len;
@@ -86,7 +83,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 			head_len = ip->ip_hl * 4;
 			pack_len = ntohs(ip->ip_len);
 			proto = ip->ip_p;
-			libnet_handler = libnet_handler4;
+			libnet_handler = libnet_handlers[0];
 			write_func = &libnet_adv_write_raw_ipv4;
 		}
 		goto end;
@@ -99,7 +96,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 			head_len = IP6_H_LEN;
 			pack_len = ntohs(ip6->ip_len) + head_len;
 			proto = ip6->ip_nh;
-			libnet_handler = libnet_handler6;
+			libnet_handler = libnet_handlers[1];
 			write_func = &libnet_write_raw_ipv6;
 		}
 		goto end;
