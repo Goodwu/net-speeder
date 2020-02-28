@@ -126,13 +126,7 @@ end:
 
 libnet_t* start_libnet(char *dev, int ver) {
 	char errbuf[LIBNET_ERRBUF_SIZE];
-	libnet_t *libnet_handler;
-	if(ver == 4) {
-		libnet_handler = libnet_init(LIBNET_RAW4_ADV, dev, errbuf);
-	}
-	else if(ver == 6) {
-		libnet_handler = libnet_init(LIBNET_RAW6_ADV, dev, errbuf);
-	}
+	libnet_t *libnet_handler = libnet_init(ver, dev, errbuf);
 
 	if(NULL == libnet_handler) {
 		printf("libnet_init: error %s\n", errbuf);
@@ -188,12 +182,12 @@ int main(int argc, char **argv) {
 
 	printf("init libnet\n");
 	libnet_t *libnet_handlers[2];
-	libnet_handlers[0] = start_libnet(dev, 4);
+	libnet_handlers[0] = start_libnet(dev, LIBNET_RAW4_ADV);
 	if(NULL == libnet_handlers[0]) {
 		printf("init libnet for ipv4 failed\n");
 		return -1;
 	}
-	libnet_handlers[1] = start_libnet(dev, 6);
+	libnet_handlers[1] = start_libnet(dev, LIBNET_RAW6_ADV);
 	if(NULL == libnet_handlers[1]) {
 		libnet_destroy(libnet_handlers[0]);
 		printf("init libnet for ipv6 failed\n");
