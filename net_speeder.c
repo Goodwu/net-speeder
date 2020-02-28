@@ -6,17 +6,22 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <libnet.h>
+#include <netpacket/packet.h>
+#include <net/ethernet.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <err.h>
 
 /* default snap length (maximum bytes per packet to capture) */
 #define SNAP_LEN 65535
 
-#ifdef COOKED
-	#define ETHERNET_H_LEN 16
-#else
-	#define ETHERNET_H_LEN 14
-#endif
+#define ETHERNET_H_LEN_COOKED 16
+#define ETHERNET_H_LEN_ETHER 14
 
 #define SPECIAL_TTL 88
+#define IP6_H_LEN 40
+
+int ethernet_h_len = 0;
 
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
 void print_usage(void);
@@ -34,41 +39,100 @@ void print_usage(void) {
 	printf("\n");
 }
 
-void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
-	static int count = 1;                  
-	struct libnet_ipv4_hdr *ip;              
+int device_get_hwinfo(char* ifname)
+{
+	int fd;
+	struct ifreq ifr;
 
-	libnet_t *libnet_handler = (libnet_t *)args;
+	fd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+	if (fd < 0) {
+		printf("Could not create packet socket! Please run horst as root!\n");
+		return -1;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+
+	if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0)
+	{
+		err(1, "Could not get arptype");
+		return -1;
+	}
+	return ifr.ifr_hwaddr.sa_family; //this value
+}
+
+void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
+	static int count = 1;
+	struct libnet_ipv4_hdr *ip;
+
+	libnet_t **libnet_handlers = (libnet_t**)args;
+	libnet_t *libnet_handler4 = libnet_handlers[0];
+	libnet_t *libnet_handler6 = libnet_handlers[1];
+
+	libnet_t *libnet_handler;
+
+	int head_len, pack_len;
+	int proto;
+
+	int(*write_func)(struct libnet_context *, const unsigned char*, unsigned int);
+
 	count++;
 	
-	ip = (struct libnet_ipv4_hdr*)(packet + ETHERNET_H_LEN);
-
-	if(ip->ip_ttl != SPECIAL_TTL) {
-		ip->ip_ttl = SPECIAL_TTL;
-		ip->ip_sum = 0;
-		if(ip->ip_p == IPPROTO_TCP) {
-			struct libnet_tcp_hdr *tcp = (struct libnet_tcp_hdr *)((u_int8_t *)ip + ip->ip_hl * 4);
-			tcp->th_sum = 0;
-			libnet_do_checksum(libnet_handler, (u_int8_t *)ip, IPPROTO_TCP, LIBNET_TCP_H);
-		} else if(ip->ip_p == IPPROTO_UDP) {
-			struct libnet_udp_hdr *udp = (struct libnet_udp_hdr *)((u_int8_t *)ip + ip->ip_hl * 4);
-			udp->uh_sum = 0;
-			libnet_do_checksum(libnet_handler, (u_int8_t *)ip, IPPROTO_UDP, LIBNET_UDP_H);
+	ip = (struct libnet_ipv4_hdr*)(packet + ethernet_h_len);
+	if(ip->ip_v == 0x4) {
+		if(ip->ip_ttl != SPECIAL_TTL) {
+			ip->ip_ttl = SPECIAL_TTL;
+			ip->ip_sum = 0;
+			head_len = ip->ip_hl * 4;
+			pack_len = ntohs(ip->ip_len);
+			proto = ip->ip_p;
+			libnet_handler = libnet_handler4;
+			write_func = &libnet_adv_write_raw_ipv4;
 		}
-		int len_written = libnet_adv_write_raw_ipv4(libnet_handler, (u_int8_t *)ip, ntohs(ip->ip_len));
-		if(len_written < 0) {
-			printf("packet len:[%d] actual write:[%d]\n", ntohs(ip->ip_len), len_written);
-			printf("err msg:[%s]\n", libnet_geterror(libnet_handler));
-		}
-	} else {
-		//The packet net_speeder sent. nothing todo
+		goto end;
 	}
+	else if(ip->ip_v == 0x6) {
+		struct libnet_ipv6_hdr *ip6;
+		ip6 = (struct libnet_ipv6_hdr*)ip;
+		if(ip6->ip_hl != SPECIAL_TTL) {
+			ip6->ip_hl = SPECIAL_TTL;
+			head_len = IP6_H_LEN;
+			pack_len = ntohs(ip6->ip_len) + head_len;
+			proto = ip6->ip_nh;
+			libnet_handler = libnet_handler6;
+			write_func = &libnet_write_raw_ipv6;
+		}
+		goto end;
+	}
+
+	if(proto == IPPROTO_TCP) {
+		struct libnet_tcp_hdr *tcp = (struct libnet_tcp_hdr *)((u_int8_t *)ip + head_len);
+		tcp->th_sum = 0;
+		libnet_do_checksum(libnet_handler, (u_int8_t *)ip, IPPROTO_TCP, LIBNET_TCP_H);
+	} else if(proto == IPPROTO_UDP) {
+		struct libnet_udp_hdr *udp = (struct libnet_udp_hdr *)((u_int8_t *)ip + head_len);
+		udp->uh_sum = 0;
+		libnet_do_checksum(libnet_handler, (u_int8_t *)ip, IPPROTO_UDP, LIBNET_UDP_H);
+	}
+	int len_written = write_func(libnet_handler, (u_int8_t *)ip, pack_len);
+	if(len_written < 0) {
+		printf("packet len:[%d] actual write:[%d]\n", ntohs(ip->ip_len), len_written);
+		printf("err msg:[%s]\n", libnet_geterror(libnet_handler));
+	}
+
+end:
 	return;
 }
 
-libnet_t* start_libnet(char *dev) {
+libnet_t* start_libnet(char *dev, int ver) {
 	char errbuf[LIBNET_ERRBUF_SIZE];
-	libnet_t *libnet_handler = libnet_init(LIBNET_RAW4_ADV, dev, errbuf);
+	libnet_t *libnet_handler;
+	if(ver == 4) {
+		libnet_handler = libnet_init(LIBNET_RAW4_ADV, dev, errbuf);
+	}
+	else if(ver == 6) {
+		libnet_handler = libnet_init(LIBNET_RAW6_ADV, dev, errbuf);
+	}
 
 	if(NULL == libnet_handler) {
 		printf("libnet_init: error %s\n", errbuf);
@@ -79,6 +143,7 @@ libnet_t* start_libnet(char *dev) {
 #define ARGC_NUM 3
 int main(int argc, char **argv) {
 	char *dev = NULL;
+	int if_type;
 	char errbuf[PCAP_ERRBUF_SIZE];
 	pcap_t *handle;
 
@@ -95,8 +160,17 @@ int main(int argc, char **argv) {
 		print_usage();	
 		return -1;
 	}
-	
-	printf("ethernet header len:[%d](14:normal, 16:cooked)\n", ETHERNET_H_LEN);
+
+	if_type = device_get_hwinfo(dev);
+	printf("if_type:%d\n", if_type);
+	if(if_type == ARPHRD_ETHER) {
+		ethernet_h_len = ETHERNET_H_LEN_ETHER;
+	}
+	else {
+		ethernet_h_len = ETHERNET_H_LEN_COOKED;
+	}
+
+	printf("ethernet header len:[%d](14:normal, 16:cooked)\n", ethernet_h_len);
 
 	if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
 		printf("Couldn't get netmask for device %s: %s\n", dev, errbuf);
@@ -113,9 +187,16 @@ int main(int argc, char **argv) {
 	}
 
 	printf("init libnet\n");
-	libnet_t *libnet_handler = start_libnet(dev);
-	if(NULL == libnet_handler) {
-		printf("init libnet failed\n");
+	libnet_t *libnet_handlers[2];
+	libnet_handlers[0] = start_libnet(dev, 4);
+	if(NULL == libnet_handlers[0]) {
+		printf("init libnet for ipv4 failed\n");
+		return -1;
+	}
+	libnet_handlers[1] = start_libnet(dev, 6);
+	if(NULL == libnet_handlers[1]) {
+		libnet_destroy(libnet_handlers[0]);
+		printf("init libnet for ipv6 failed\n");
 		return -1;
 	}
 
@@ -130,12 +211,13 @@ int main(int argc, char **argv) {
 	}
 
 	while(1) {
-		pcap_loop(handle, 1, got_packet, (u_char *)libnet_handler);
+		pcap_loop(handle, 1, got_packet, (u_char *)libnet_handlers);
 	}
 
 	/* cleanup */
 	pcap_freecode(&fp);
 	pcap_close(handle);
-	libnet_destroy(libnet_handler);
+	libnet_destroy(libnet_handlers[0]);
+	libnet_destroy(libnet_handlers[1]);
 	return 0;
 }
